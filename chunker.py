@@ -80,24 +80,105 @@ def fallback_split(
     return chunks
 
 
+def _split_into_sections(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """
+    Break one markdown document into (title, [(heading, body), ...]).
+
+    A line starting with `# ` is the document title. A line starting with `## `
+    opens a section. Anything before the first `##` becomes an intro section
+    with an empty heading, which is where the one-paragraph scene-setter at the
+    top of each guide ends up.
+    """
+    title = ""
+    sections: list[tuple[str, str]] = []
+    heading = ""
+    body: list[str] = []
+
+    for line in text.split("\n"):
+        if line.startswith("## "):
+            sections.append((heading, "\n".join(body).strip()))
+            heading = line[3:].strip()
+            body = []
+        elif line.startswith("# ") and not title:
+            title = line[2:].strip()
+        else:
+            body.append(line)
+
+    sections.append((heading, "\n".join(body).strip()))
+    return title, [(h, b) for h, b in sections if b]
+
+
+def _pack_paragraphs(body: str, limit: int, overlap: int) -> list[str]:
+    """
+    Fit a long section into pieces no bigger than `limit`, cutting only at
+    blank lines.
+
+    The last paragraph of a piece is repeated at the front of the next one when
+    it fits inside `overlap`. That is the overlap doing something useful — a
+    whole thought carried across — rather than an arbitrary number of trailing
+    characters.
+    """
+    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+    if not paragraphs:
+        return []
+
+    pieces: list[str] = []
+    current: list[str] = []
+
+    for paragraph in paragraphs:
+        candidate = current + [paragraph]
+        if current and sum(len(p) + 2 for p in candidate) > limit:
+            pieces.append("\n\n".join(current))
+            tail = current[-1]
+            current = [tail, paragraph] if len(tail) <= overlap else [paragraph]
+        else:
+            current = candidate
+
+    if current:
+        pieces.append("\n\n".join(current))
+    return pieces
+
+
 def split_documents(documents: list[Document]) -> list[Chunk]:
     """
-    Split documents into chunks. ⚠️ REPLACE THE BODY OF THIS IN MILESTONE 3.
+    Split documents into chunks, one per labelled section.
 
-    Right now it just calls the fallback. That is the plain, generic behaviour
-    the brief is talking about.
+    Every chunk opens with `Title — Heading` so it can be read on its own. That
+    line is not decoration: these guides describe nine different towns in the
+    same vocabulary, and a chunk about opening hours that doesn't say which
+    town it belongs to will match every question about opening hours equally
+    badly.
 
-    When you write your own strategy, set `produced_by` to
-    "chunker.py::split_documents" so your README's Sample Chunks section names
-    the right function. `app.py chunks` prints that string for you.
-
-    Things worth thinking about before you write any code:
-      - Are your documents short posts or long guides?
-      - Is the useful information in one sentence, or spread over a paragraph?
-      - Would splitting on paragraph breaks keep more thoughts intact than
-        splitting on a character count?
+    Documents with no `##` headings — which is what `campus_life` and most of
+    `advice_threads` look like — fall through to paragraph packing, so this
+    behaves sensibly on the other corpora rather than only on the one it was
+    written for.
     """
-    return fallback_split(documents)
+    limit = config.CHUNK_SIZE
+    overlap = config.CHUNK_OVERLAP
+
+    chunks: list[Chunk] = []
+    for doc in documents:
+        title, sections = _split_into_sections(doc.text)
+        index = 0
+
+        for heading, body in sections:
+            label = " — ".join(part for part in (title, heading) if part)
+
+            for piece in _pack_paragraphs(body, limit, overlap):
+                text = f"{label}\n\n{piece}" if label else piece
+                chunks.append(
+                    Chunk(
+                        text=text,
+                        source=doc.source,
+                        index=index,
+                        produced_by="chunker.py::split_documents",
+                    )
+                )
+                index += 1
+
+    return chunks
+
 
 
 def describe(chunks: list[Chunk]) -> str:
